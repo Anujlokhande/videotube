@@ -4,23 +4,47 @@ import { User } from "../models/user.model.js";
 import { uploadOnCloudinary } from "../utils/cloudinary.js";
 import { ApiResponce } from "../utils/ApiResponce.js";
 
+const generateAccessAndRefreshToken = async (userId) => {
+  try {
+    const user = await User.findById(userId);
+    const accessToken = await user.generateAccessToken();
+    const refreshToken = await user.generateRefreshToken();
+
+    user.refreshToken = refreshToken;
+    await user.save({ validateBeforeSave: false });
+
+    return { accessToken, refreshToken };
+  } catch (error) {
+    throw new ApiError(500, "something went wrong while generating tokens");
+  }
+};
+
 const registerUser = asyncHandler(async (req, res) => {
   const { fullName, email, username, password } = req.body;
-  console.log(email);
+
   if (
     [fullName, email, password, username].some((feild) => feild?.trim() === "")
   ) {
     throw new ApiError(400, "All feild required");
   }
 
-  const existedUser = User.findOne({ $or: [{ email }, { username }] });
+  const existedUser = await User.findOne({ $or: [{ email }, { username }] });
   if (existedUser) {
     throw new ApiError(409, "User with username or email already exist");
   }
 
-  console.log(req.files);
-  const avatarLocalPath = req.files?.avatar[0]?.path;
-  const coverImageLocalPath = req.files?.coverimage[0]?.path;
+  const avatarLocalPath = req.files?.avatar?.[0]?.path;
+
+  //   const coverImageLocalPath = req.files?.coverimage[0]?.path;
+
+  let coverImageLocalPath;
+  if (
+    req.files &&
+    Array.isArray(req.files.coverimage) &&
+    req.files.coverimage.length > 0
+  ) {
+    coverImageLocalPath = req.files.coverimage[0].path;
+  }
 
   if (!avatarLocalPath) {
     throw new ApiError(400, "Avatar File Is Needed");
@@ -28,11 +52,12 @@ const registerUser = asyncHandler(async (req, res) => {
   const uploadedAvatar = await uploadOnCloudinary(avatarLocalPath);
   const uploadedCoverImage = await uploadOnCloudinary(coverImageLocalPath);
   if (!uploadedAvatar) {
-    throw new ApiError(400, "Avatar File Is Needed");
+    throw new ApiError(400, "Avatar File Is Needed upload");
   }
 
   const user = await User.create({
     fullName,
+    username,
     avatar: uploadedAvatar.url,
     coverimage: uploadedCoverImage?.url || "",
     email,
@@ -52,4 +77,74 @@ const registerUser = asyncHandler(async (req, res) => {
     .json(new ApiResponce(200, createdUser, "User Registered Successfully"));
 });
 
-export { registerUser };
+const loginUser = asyncHandler(async (req, res) => {
+  const { email, username, password } = req.body;
+  if (!username && !email) {
+    throw new ApiError(400, "username or email is required");
+  }
+
+  const userExist = await User.findOne({
+    $or: [{ email }, { username }],
+  });
+
+  if (!userExist) {
+    throw new ApiError(404, "user does not exist");
+  }
+
+  const isPassword = await userExist.isPasswordCorrect(password);
+  if (!isPassword) {
+    throw new ApiError(401, "password is not valid");
+  }
+
+  const { accessToken, refreshToken } = await generateAccessAndRefreshToken(
+    userExist._id
+  );
+
+  const loggedInUser = await User.findById(userExist._id).select(
+    "-password -refreshToken"
+  );
+
+  const options = {
+    httpOnly: true,
+    secure: true,
+  };
+
+  return res
+    .status(200)
+    .cookie("accessToken", accessToken, options)
+    .cookie("refreshToken", refreshToken, options)
+    .json(
+      new ApiResponce(
+        200,
+        { user: loggedInUser, accessToken, refreshToken },
+        "User Logged In Successfully"
+      )
+    );
+});
+
+const logoutUser = asyncHandler(async (req, res) => {
+  const user = await User.findByIdAndUpdate(
+    req.user._id,
+    {
+      $set: {
+        refreshToken: undefined,
+      },
+    },
+    {
+      new: true,
+    }
+  );
+
+  const options = {
+    httpOnly: true,
+    secure: true,
+  };
+
+  return res
+    .status(200)
+    .clearCookie("accessToken")
+    .clearCookie("refreshToken")
+    .json(new ApiResponce(200, {}, "User Logged Out"));
+});
+
+export { registerUser, loginUser, logoutUser };
